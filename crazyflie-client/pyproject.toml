@@ -1,0 +1,29 @@
+[project]
+name = "ae483"
+version = "2026.0"
+description = "Crazyflie client and analysis environment for AE483"
+readme = "README.md"
+requires-python = "==3.12.*"
+dependencies = [
+    "numpy",
+    "scipy",
+    "sympy",
+    "matplotlib",
+    "jupyter",
+    "cflib",
+    "cfclient",
+    "qtm-rt",
+]
+
+[project.scripts]
+ae483-reboot = "ae483.reboot:main"
+ae483-flash = "ae483.flash:main"
+
+[build-system]
+requires = ["uv_build>=0.12.3,<0.13"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "ipykernel>=7.3.0",
+]
