@@ -100,6 +100,108 @@ def transform_data_mocap(raw_data):
     # Return the result
     return data
 
+import math
+
+
+def quaternion_to_euler(x, y, z, w):
+  # Roll (X-axis rotation)
+  sinr_cosp = 2.0 * (w * x + y * z)
+  cosr_cosp = 1.0 - 2.0 * (x * x + y * y)
+  roll = math.atan2(sinr_cosp, cosr_cosp)
+
+  # Pitch (Y-axis rotation)
+  sinp = 2.0 * (w * y - z * x)
+  if abs(sinp) >= 1:
+    pitch = math.copysign(math.pi / 2, sinp)  # use 90 degrees if out of range
+  else:
+    pitch = math.asin(sinp)
+
+  # Yaw (Z-axis rotation)
+  siny_cosp = 2.0 * (w * z + x * y)
+  cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+  yaw = math.atan2(siny_cosp, cosy_cosp)
+
+  return roll, pitch, yaw
+
+
+def mocap_transform(pose):
+
+    x, y, z = pose[0], pose[1], pose[2]
+    phi, theta, psi = quaternion_to_euler(pose[3], pose[4], pose[5], pose[6])
+
+    # Define parameters
+    d_1 = 0.018
+    d_2 = 0.010
+    
+    # Pose of drone body frame in active marker frame
+    R_inA_ofB = np.eye(3)                   # <-- FIXME
+    p_inA_ofB = np.array([0., 0., -d_1])      # <-- FIXME
+
+    ####################################
+    # START OF ANALYSIS AT TIME STEP 0
+    #
+    
+    # Pose of drone world frame in active marker frame
+    R_inA_ofW = np.eye(3)                   # <-- FIXME
+    p_inA_ofW = np.array([0., 0., -1*(d_1+d_2)])      # <-- FIXME
+
+
+    # Pose of active marker frame in mocap world frame
+    R_inQ_ofA = Rotation.from_euler(
+        'ZYX',
+        [psi, theta, phi],
+        degrees = False,
+    ).as_matrix()              # <-- FIXME
+    p_inQ_ofA = np.array([x,y,z])      # <-- FIXME
+    
+    # Pose of drone world frame in mocap world frame
+    R_inQ_ofW = Rotation.from_euler(
+        'ZYX',
+        [psi, theta, phi],
+        degrees = False,
+    ).as_matrix()                   # <-- FIXME
+    p_inQ_ofW = np.array([x,y,z-(d_1+d_2)])      # <-- FIXME
+    
+    # Pose of mocap world frame in drone world frame
+    R_inW_ofQ = R_inQ_ofW.T                   # <-- FIXME
+    p_inW_ofQ = np.matmul(-1*(R_inQ_ofW.T), p_inQ_ofW)     # <-- FIXME
+
+    #
+    # END OF ANALYSIS AT TIME STEP 0
+    ####################################
+
+
+
+    ####################################
+    # START OF ANALYSIS AT TIME STEP i
+    #
+
+    # Get measurements of (x, y, z) and (psi, theta, phi) from mocap
+    x, y, z = data['x'][i], data['y'][i], data['z'][i]
+    psi, theta, phi = data['yaw'][i], data['pitch'][i], data['roll'][i]
+
+    # Pose of active marker deck in mocap world frame
+    R_inQ_ofA = Rotation.from_euler(
+    'ZYX',
+    [psi, theta, phi],
+    degrees = False,
+    ).as_matrix()                # <-- FIXME
+
+    p_inQ_ofA = np.array([x, y, z])  # <-- FIXME
+
+    # Pose of drone body frame in mocap world frame
+    R_inQ_ofB = np.matmul(R_inQ_ofA, R_inA_ofB)              # <-- FIXME
+    p_inQ_ofB = p_inQ_ofA + np.matmul(R_inQ_ofA, p_inA_ofB)
+
+    # Pose of drone body frame in drone world frame
+    R_inW_ofB = np.matmul(R_inW_ofQ, R_inQ_ofB)               # <-- FIXME
+    p_inW_ofB = p_inW_ofQ + np.matmul(R_inW_ofQ, p_inQ_ofB)  # <-- FIXME
+
+    # Replace measurements of (x, y, z) and (phi, theta, psi) from mocap
+    data['x'][i], data['y'][i], data['z'][i] = p_inW_ofB[0], p_inW_ofB[1], p_inW_ofB[2]               # <-- FIXME
+    data['yaw'][i], data['pitch'][i], data['roll'][i] = Rotation.from_matrix(R_inW_ofB).as_euler('ZYX')     # <-- FIXME
+
+
 
 def precise_time_shift(raw_data_mocap, t, z_drone, t_shift_guess,
                        do_transform=True, t_min_offset=0.,
