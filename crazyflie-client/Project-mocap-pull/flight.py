@@ -20,7 +20,7 @@ uri = 'radio://0/36/2M/E7E7E7E7E7'
 # deck in the motion capture system. If your marker deck number is X, this name
 # should be 'marker_deck_X'.
 pursuer = 'marker_deck_30'
-runner = 'marker_deck_16'
+# runner = 'marker_deck_16'
 
 # Specify the marker IDs that correspond to your active marker deck in the
 # motion capture system. If your marker deck number is X, these IDs should be
@@ -139,8 +139,8 @@ try:
 
     # Create and start the client that will connect to the motion capture system
     if use_mocap:
-        mocap_client = QualisysClient([{'name': pursuer, 'callback': None},
-                                       {'name': runner, 'callback' : drone_client.send_pose}])
+        mocap_client = QualisysClient([{'name': pursuer, 'callback': drone_client.send_pose}])
+                                    #    {'name': runner, 'callback' : drone_client.send_pose}])
 
     # Arm the drone. Brushless drones will not spin their motors until they are
     # armed. Brushed drones do not need to be armed, but arming them does no
@@ -149,17 +149,18 @@ try:
 
 
 
-    # # Pause before takeoff
-    # drone_client.stop(1.0)
+    # Pause before takeoff
+    drone_client.stop(1.0)
 
 
-    # # Hover for ten seconds
-    # drone_client.move(0.0, 0.0, 0.20, 0.0, 10.0)
+    # Hover for ten seconds
+    drone_client.move(0.0, 0.0, 0.20, 0.0, 3.0)
 
-    # # Pause after landing
-    # drone_client.stop(1.0)
+    # Pause after landing
 
-    drone_client.stop(5.0)
+    drone_client.stop(1.0)
+
+    # drone_client.stop(5.0)
 
 
     # # Graceful takeoff
@@ -201,7 +202,7 @@ finally:
     data['gains_created'] = gains_created if drone_client.gains is not None else None
     data['use_controller'] = use_controller
     data['drone'] = drone_client.data
-    data['mocap'] = mocap_client.data.get(runner, {}) if use_mocap and mocap_client is not None else {}
+    data['mocap'] = mocap_client.data.get(pursuer, {}) if use_mocap and mocap_client is not None else {}
     data['bodies'] = mocap_client.data if use_mocap and mocap_client is not None else {}
 
     # Write flight data to a file. We write to a temporary file first and then
