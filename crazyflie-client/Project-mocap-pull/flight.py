@@ -1,10 +1,14 @@
 ###################################
 # IMPORTS
 
+import time
+import numpy as np
 import json
 import os
-from ae483.clients import QualisysClient
+from clients_tracking import QualisysClient
+# from ae483.clients import QualisysClient
 from ae483.myclients import MyCrazyflieClient
+from ae483.mytools import *
 
 
 ###################################
@@ -20,7 +24,7 @@ uri = 'radio://0/36/2M/E7E7E7E7E7'
 # deck in the motion capture system. If your marker deck number is X, this name
 # should be 'marker_deck_X'.
 pursuer = 'marker_deck_30'
-# runner = 'marker_deck_16'
+runner = 'Reference'
 
 # Specify the marker IDs that correspond to your active marker deck in the
 # motion capture system. If your marker deck number is X, these IDs should be
@@ -34,7 +38,7 @@ marker_deck_ids = [31, 32, 33, 34]
 use_mocap = True
 
 # Specify whether or not to use a custom controller
-use_controller = True
+use_controller = False
 
 # Specify whether or not to use a custom observer
 use_observer = False
@@ -86,12 +90,42 @@ variables = [
     'ae483log.m_4',
 ]
 
-def update_runner_target(pose):
-    global latest_runner_position
-    x, y, z, qx, qy, qz, qw = pose
-    latest_runner_position = (x,y,z)
-    print(latest_runner_position)
+# Where the pursuer should sit relative to the runner (meters). Keep this
+# sideways rather than above or below, so neither drone flies in the other's
+# downwash. The z component is ignored - the pursuer holds tracking_height.
+tracking_offset = np.array([-0.2, 0.0])
 
+# Height at which the pursuer flies while tracking (meters)
+tracking_height = 0.2
+
+# How long to track the runner (seconds)
+tracking_duration = 30.0
+
+# The pursuer's setpoint is always kept inside this box (meters)
+box_min = np.array([-1.0, -1.0, 0.15])
+box_max = np.array([ 1.0,  1.0, 1.00])
+
+# Largest change in the setpoint per loop (meters). At 10 Hz, 0.05 m per loop
+# limits the setpoint to moving at 0.5 m/s.
+max_step = 0.05
+
+# The pursuer's setpoint is kept at least this far from the runner (meters,
+# measured in the horizontal plane). If the straight path to the target would
+# pass closer than this, the setpoint walks around the runner instead.
+min_separation = 0.1
+
+# If the pursuer's own motion capture data are older than this (seconds), its
+# state estimate is no longer being corrected, so stop tracking and land
+pursuer_max_age = 0.3
+
+# Before takeoff, the drone's state estimate must agree with motion capture to
+# within this distance (meters), or the flight is aborted
+max_estimate_error = 0.1
+
+def angle_about(p, center):
+    """Angle (radians) of point p around center, in the horizontal plane."""
+    d = p[:2] - center[:2]
+    return np.arctan2(d[1], d[0])
 
 ###################################
 # FLIGHT CODE
@@ -139,42 +173,85 @@ try:
 
     # Create and start the client that will connect to the motion capture system
     if use_mocap:
-        mocap_client = QualisysClient([{'name': pursuer, 'callback': drone_client.send_pose}])
-                                    #    {'name': runner, 'callback' : drone_client.send_pose}])
+        mocap_client = QualisysClient([{'name': pursuer, 'callback': drone_client.send_pose},
+                                       {'name': runner, 'callback' : None}])
 
     # Arm the drone. Brushless drones will not spin their motors until they are
     # armed. Brushed drones do not need to be armed, but arming them does no
     # harm, so the same flight code works for both.
     drone_client.arm()
 
-
-
-    # Pause before takeoff
     drone_client.stop(1.0)
 
 
-    # Hover for ten seconds
-    drone_client.move(0.0, 0.0, 0.20, 0.0, 3.0)
+    # Make sure both drones are visible to the motion capture system before
+    # flying. This raises an exception (and so never takes off) if either
+    # rigid body is missing.
+    mocap_client.wait_for_data(pursuer)
+    mocap_client.wait_for_data(runner)
+
+
+    posi_p, _, _ =(mocap_client.get_latest(pursuer, max_age=None))
+    posi_p = mocap_transform(posi_p)
+    x0, y0 = np.clip(posi_p[:2], box_min[:2], box_max[:2])
+
+    # Graceful takeoff
+    # drone_client.move(0.0, 0.0, 0.20, 0.0, 1.0)
+    # drone_client.move(0.0, 0.0, 0.35, 0.0, 1.0)
+    # drone_client.move(0.0, 0.0, 0.50, 0.0, 1.0)
+
+    # drone_client.move(0.0, 0.0, 0.50, 0.0, 5.0)
+    drone_client.move(0.0,0.0,0.2,0.0,2)
+
+    start_time = time.time()
+    while time.time() - start_time < tracking_duration:
+        posi_p, _, _ = mocap_transform((mocap_client.get_latest(pursuer, max_age=pursuer_max_age)))
+        posi_p = mocap_transform(posi_p)
+        if posi_p is None:
+            print(f'Lost motion capture data for {pursuer} - landing')
+            break
+        p_pursuer = np.array(posi_p[:2])
+
+        posi_r, _, _ = mocap_transform((mocap_client.get_latest(runner)))
+        posi_r = mocap_transform(posi_r)
+        if posi_r is not None:
+            p_runner = np.array(posi_r[:2])
+            target = p_runner + tracking_offset
+            target = np.clip(target, box_min, box_max)
+
+        step = target - p_pursuer
+        step_length = np.linalg.norm(step)
+        if step_length > max_step:
+            step *= max_step / step_length
+        p_next = step
+
+
+        # d_next = np.linalg.norm(step[:2] - p_runner[:2])
+        # d_pursuer = np.linalg.norm(p_pursuer[:2] - p_runner[:2])
+        # if d_next < min_separation or d_pursuer < min_separation:
+        #     p_from = p_pursuer if d_pursuer < min_separation else p_next
+        #     a_now = angle_about(p_from, p_runner)
+        #     a_goal = angle_about(target, p_runner)
+        #     da = (a_goal - a_now + np.pi) % (2 * np.pi) - np.pi
+        #     da = np.clip(da, -max_step / min_separation, max_step / min_separation)
+        #     p_next[:2] = p_runner[:2] + min_separation * np.array([np.cos(a_now + da), np.sin(a_now + da)])
+        #     p_next = np.clip(p_next, box_min, box_max)
+
+        p_des = p_next
+
+        drone_client.cf.commander.send_position_setpoint(*p_des, tracking_height, 0.0)
+        time.sleep(0.1)
+
+    # Graceful landing, wherever tracking left the pursuer
+    # drone_client.move(0., 0., 0.35, 0.0, 1.0)
+    drone_client.move(0., 0., 0.20, 0.0, 1.0)
 
     # Pause after landing
-
     drone_client.stop(1.0)
 
-    # drone_client.stop(5.0)
 
 
-    # # Graceful takeoff
-    # drone_client.move(0.0, 0.0, 0.20, 0.0, 1.0)
-    # drone_client.move(0.0, 0.0, 0.35, 0.0, 1.0)
-    # drone_client.move(0.0, 0.0, 0.50, 0.0, 1.0)
 
-    # # Hover for ten seconds
-    # drone_client.move(0.0, 0.0, 0.50, 0.0, 10.0)
-
-    # # Graceful landing
-    # drone_client.move(0.0, 0.0, 0.50, 0.0, 1.0)
-    # drone_client.move(0.0, 0.0, 0.35, 0.0, 1.0)
-    # drone_client.move(0.0, 0.0, 0.20, 0.0, 1.0)
 
 except KeyboardInterrupt:
     print('\nInterrupted - stopping the motors and saving whatever data were collected.')
