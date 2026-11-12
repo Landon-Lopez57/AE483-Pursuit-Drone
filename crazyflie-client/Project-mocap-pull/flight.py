@@ -10,7 +10,6 @@ from clients_tracking import QualisysClient
 from ae483.myclients import MyCrazyflieClient
 from ae483.mytools import *
 from tracking import tracking_step, travel_direction
-from collision_avoidance import avoidance_step, AvoidanceState, AvoidanceSettings
 
 
 ###################################
@@ -200,8 +199,6 @@ try:
     # Until the runner moves, use the direction from pursuer to runner.
     runner_direction = np.array(posi_r[:2]) - position[:2]
     runner_direction /= np.linalg.norm(runner_direction)
-    avoidance_state = AvoidanceState()
-    avoidance_settings = AvoidanceSettings(min_separation=min_separation)
     command = position.copy()
     landing_z = position[2]  # Return to the measured starting surface height.
     period = 0.1
@@ -241,19 +238,11 @@ try:
             p_pursuer = np.array(posi_p[:2])
             p_runner = np.array(posi_r[:2])
             runner_direction = travel_direction(runner_velocity, runner_direction)
-            p_next, target, _ = tracking_step(
+            p_next, target, too_close = tracking_step(
                 command, p_pursuer, p_runner, runner_direction, follow_distance,
                 box_min, box_max, max_step, min_separation)
-            # Wait for velocity estimates rather than guessing nearby motion.
-            if pursuer_velocity is None or runner_velocity is None:
-                print('Missing velocity estimate - ending pursuit')
-                break
-            p_next, avoidance_status = avoidance_step(
-                p_pursuer, pursuer_velocity, command, p_next,
-                [(p_runner, runner_velocity)], box_min, box_max, max_step,
-                avoidance_state, avoidance_settings)
-            if avoidance_status == 'stop':
-                print('No safe avoidance command - ending pursuit')
+            if too_close:
+                print('Minimum separation reached - ending pursuit')
                 break
             command[:2] = p_next
             send(command)
