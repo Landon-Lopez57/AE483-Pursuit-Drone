@@ -9,7 +9,9 @@ from clients_tracking import QualisysClient
 # from ae483.clients import QualisysClient
 from ae483.myclients import MyCrazyflieClient
 from ae483.mytools import *
-from tracking import tracking_step, travel_direction
+from tracking import travel_direction
+from pursuit_avoidance import PursuitAvoidance
+from match_config import CONFIG
 
 
 ###################################
@@ -91,26 +93,25 @@ variables = [
     'ae483log.m_4',
 ]
 
-# Follow 0.3 m behind the runner's horizontal travel direction.
-follow_distance = 0.3
+# Follow 0.5 m behind the runner's horizontal travel direction.
+follow_distance = CONFIG.follow_distance
 
 # Height at which the pursuer flies while tracking (meters)
-tracking_height = 0.2
+tracking_height = CONFIG.height
 
 # How long to track the runner (seconds)
-tracking_duration = 30.0
+tracking_duration = CONFIG.duration
 
 # The pursuer's setpoint is always kept inside this box (meters)
-box_min = np.array([-1.0, -1.0, 0.15])
-box_max = np.array([ 1.0,  1.0, 1.00])
+box_min = CONFIG.lower
+box_max = CONFIG.upper
 
 # Largest change in the setpoint per loop (meters). At 10 Hz, 0.05 m per loop
 # limits the setpoint to moving at 0.5 m/s.
-max_step = 0.05
+max_step = CONFIG.horizontal_speed * CONFIG.period
 
-# The pursuer's setpoint is kept at least this far from the runner (meters,
-# measured in the horizontal plane). If the straight path to the target would
-# pass closer than this, the setpoint walks around the runner instead.
+# Minimum horizontal separation for takeoff. In pursuit, the shared VO
+# controller uses its larger buffered ellipsoidal envelope.
 min_separation = 0.1
 
 # If the pursuer's own motion capture data are older than this (seconds), its
@@ -201,33 +202,42 @@ try:
     runner_direction /= np.linalg.norm(runner_direction)
     command = position.copy()
     landing_z = position[2]  # Return to the measured starting surface height.
-    period = 0.1
+    period = CONFIG.period
 
     # Helper to move pursuer drone
     def send(position):
         drone_client.cf.commander.send_position_setpoint(*position, 0.0)
 
-    # Gradualy lower and stop drone without falling from sky
-    def descend():
-        while command[2] > landing_z:
-            command[2] = max(landing_z, command[2] - 0.1 * period)
+    def change_altitude(goal):
+        start = command[2]
+        distance = abs(goal - start)
+        if distance < 1e-9:
+            return
+        duration = max(1.875 * distance / CONFIG.vertical_speed,
+                       np.sqrt(5.774 * distance / CONFIG.vertical_acceleration), period)
+        steps = int(np.ceil(duration / period))
+        for k in range(1, steps + 1):
+            pp, _, _ = mocap_client.get_latest(pursuer, max_age=pursuer_max_age)
+            pr, _, _ = mocap_client.get_latest(runner)
+            if pp is None or pr is None:
+                raise RuntimeError('Lost mocap during altitude transition')
+            if np.linalg.norm(np.array(pp[:2])-pr[:2]) < min_separation:
+                raise RuntimeError('Minimum separation during altitude transition')
+            u = k / steps
+            command[2] = start + (goal-start)*(10*u**3-15*u**4+6*u**5)
             send(command)
             time.sleep(period)
+
+    # Lower smoothly to the measured starting surface.
+    def descend():
+        change_altitude(landing_z)
         drone_client.stop(1.0)
 
     try:
-        # Ramp vertically from the current position instead of jumping to origin.
-        while abs(command[2] - tracking_height) > 1e-6:
-            posi_p, pursuer_velocity, _ = mocap_client.get_latest(pursuer, max_age=pursuer_max_age)
-            posi_r, runner_velocity, _ = mocap_client.get_latest(runner)
-            if posi_p is None or posi_r is None:
-                raise RuntimeError('Lost mocap during takeoff')
-            if np.linalg.norm(np.array(posi_p[:2]) - posi_r[:2]) < min_separation:
-                raise RuntimeError('Min sep during takeoff')
-            command[2] += np.clip(tracking_height - command[2], -0.01, 0.01)
-            send(command)
-            time.sleep(period)
+        change_altitude(tracking_height)
 
+        avoidance = PursuitAvoidance(command, box_min, box_max, tracking_height,
+                                     period, max_step, follow_distance)
         start_time = time.time()
         while time.time() - start_time < tracking_duration:
             posi_p, pursuer_velocity, _ = mocap_client.get_latest(pursuer, max_age=pursuer_max_age)
@@ -238,13 +248,12 @@ try:
             p_pursuer = np.array(posi_p[:2])
             p_runner = np.array(posi_r[:2])
             runner_direction = travel_direction(runner_velocity, runner_direction)
-            p_next, target, too_close = tracking_step(
-                command, p_pursuer, p_runner, runner_direction, follow_distance,
-                box_min, box_max, max_step, min_separation)
-            if too_close:
-                print('Minimum separation reached - ending pursuit')
+            next_command, target, status = avoidance.step(
+                posi_p[:3], pursuer_velocity, posi_r[:3], runner_velocity, runner_direction)
+            if status == 'stop':
+                print(f'Avoidance stop: {avoidance.last_reason} - landing')
                 break
-            command[:2] = p_next
+            command[:] = next_command
             send(command)
             time.sleep(period)
     finally:
